@@ -172,9 +172,11 @@ class GNN(nn.Module):
     def forward(self, A, hidden):
         for i in range(self.step):
             hidden = self.GNNCell(A, hidden)
-            if i == self.step - 1:
+            if i == 0:
+                first_hidden = hidden
+            elif i == self.step - 1:
                 final_hidden = hidden
-        return hidden, final_hidden
+        return hidden, first_hidden, final_hidden
 
 
 class BandedFourierLayer(nn.Module):
@@ -431,7 +433,7 @@ class MyModel(SequentialRecommender):
             # output_f = self.kan(output_f)
             seq_output_f = self.gather_indexes(output_f, item_seq_len - 1)
             # seq_output_f = self.linear_1(seq_output_f)
-            seq_output_f = self.kan(seq_output_f)
+            # seq_output_f = self.kan(seq_output_f)
             # seq_output_f = self.linear_2(seq_output_f)
             # return seq_output_t, seq_output_f, seq_output_aug
             return seq_output_t, seq_output_f
@@ -446,18 +448,18 @@ class MyModel(SequentialRecommender):
 
         hidden = self.item_embedding(items)
         # hidden_t = self.linear_1(hidden)
-        hidden, final_hidden = self.gnn(A, hidden)
-        
-        seq_hidden = torch.gather(hidden, dim=1, index=alias_inputs)
-        # fetch the last hidden state of last timestamp
-        seq_output = self.gather_indexes(seq_hidden, item_seq_len - 1)
+        res_hidden = self.gnn(A, hidden)
 
-        seq_final_hidden = torch.gather(final_hidden, dim=1, index=alias_inputs)
-        # fetch the last hidden state of last timestamp
-        seq_final_output = self.gather_indexes(seq_final_hidden, item_seq_len - 1)
+        def last_hidden(x):
+            seq_hidden = torch.gather(x, dim=1, index=alias_inputs)
+            # fetch the last hidden state of last timestamp
+            seq_output = self.gather_indexes(seq_hidden, item_seq_len - 1)
+            return seq_output
+        
+        seq_output, seq_first_output, seq_final_output = [last_hidden(x) for x in res_hidden]
         # seq_output_t = self.kan(seq_output_t)
         
-        return seq_output, seq_final_output  # [B H]
+        return seq_output, seq_first_output, seq_final_output  # [B H]
 
     # 3
     def calculate_loss(self, interaction):
