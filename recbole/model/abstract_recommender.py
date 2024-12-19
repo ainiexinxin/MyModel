@@ -113,6 +113,7 @@ class SequentialRecommender(AbstractRecommender):
         self.NEG_ITEM_ID = config['NEG_PREFIX'] + self.ITEM_ID
         self.max_seq_length = config['MAX_ITEM_LIST_LENGTH']
         self.n_items = dataset.num(self.ITEM_ID)
+        self.device = config["device"]
 
     def gather_indexes(self, output, gather_index):
         """Gathers the vectors at the specific positions over a minibatch"""

@@ -276,7 +276,7 @@ class MyModel(SequentialRecommender):
         # self.hidden_size: This is the dimension of the embedding vector, which can also be called the dimension of the embedding space. It specifies the length of each embedded vector.
         # padding_idx=0: This is an optional parameter that specifies a special number for "fill".
         # In sequence data, you can use a number (usually 0) as a fill item, and the embedding layer creates an all-zero embedding vector for that number.
-        self.item_embedding = nn.Embedding(self.n_items, self.hidden_size, padding_idx=0)
+        self.item_embedding = nn.Embedding(self.n_items + 1, self.hidden_size, padding_idx=0)
         self.position_embedding = nn.Embedding(self.max_seq_length, self.hidden_size)
         self.trm_encoder = TransformerEncoder(
             n_layers=self.n_layers,
@@ -394,6 +394,17 @@ class MyModel(SequentialRecommender):
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
+    def get_attention_mask(self, item_seq, bidirectional=False):
+        """Generate left-to-right uni-directional or bidirectional attention mask for multi-head attention."""
+        attention_mask = item_seq != 0
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # torch.bool
+        if not bidirectional:
+            extended_attention_mask = torch.tril(
+                extended_attention_mask.expand((-1, -1, item_seq.size(-1), -1))
+            )
+        extended_attention_mask = torch.where(extended_attention_mask, 0.0, -10000.0)
+        return extended_attention_mask
+
     # 4
     def forward(self, item_seq, item_seq_len, generate_layer=None):
         position_ids = torch.arange(item_seq.size(1), dtype=torch.long, device=item_seq.device)
@@ -413,23 +424,6 @@ class MyModel(SequentialRecommender):
         # seq_output_t = self.kan(seq_output_t)
 
         if generate_layer is not None:
-            
-            # alias_inputs, A, items, _ = self._get_slice(item_seq)
-
-            # alias_inputs = alias_inputs.view(-1, alias_inputs.size(1), 1).expand(-1, -1, self.embedding_size)
-
-            # # noise = tool.gaussian_noise(input_emb, self.config['noise_base'])
-            # # mask1 = item_seq.gt(0).unsqueeze(dim=2)
-            # # noise1 = noise * mask1
-            # # input_emb_noise = input_emb + noise1
-            # hidden = self.item_embedding(items)
-
-            # output_aug = self.gnn(A, hidden)
-            
-            # seq_output_aug = torch.gather(output_aug, dim=1, index=alias_inputs)
-            # # fetch the last hidden state of last timestamp
-            # seq_output_aug = self.gather_indexes(seq_output_aug, item_seq_len - 1)
-
             output_fft = generate_layer(input_emb)
             trm_output_f = self.trm_encoder(output_fft, extended_attention_mask, output_all_encoded_layers=True)
 
@@ -489,10 +483,6 @@ class MyModel(SequentialRecommender):
         nce_loss_amp = 0.0
         nce_loss_phase = 0.0
 
-        item_seq = interaction[self.ITEM_SEQ]
-        item_seq_len = interaction[self.ITEM_SEQ_LEN]
-
-
         seq_output_t, seq_output_f = forward(item_seq, item_seq_len, self.fft_layer)
         seq_output_t_aug = forward(aug_item_seq, aug_item_seq_len)
 
@@ -524,6 +514,39 @@ class MyModel(SequentialRecommender):
         loss += cff * self.rec_loss(interaction, seq_output)
         loss += self.InfoNCE(seq_output_aug, seq_output)
 
+        return loss
+    
+    def rec_loss(self, interaction, seq_output):
+        # item_seq
+        # item_seq = interaction[self.ITEM_SEQ]  # N(B) * L(sequence length), long truncation, not enough to fill 0
+        # item_seq_len = interaction[self.ITEM_SEQ_LEN]
+        # # seq_output It is the result of passing the input sequence forward through the neural network. It is a tensor of shape N * D, where N is the batch size and D is the dimension of the output
+        # seq_output = forward(item_seq, item_seq_len)  # N * D(Dim) # N * D(Dim)
+        # pos_items Represents a positive item associated with a given sequence.
+        pos_items = interaction[self.POS_ITEM_ID]
+        if self.loss_type == 'BPR':
+            # Calculate Bayesian Personalized Ranking (BPR) losses, using positive and negative items and embeddings to calculate scores, and then calculate losses
+            neg_items = interaction[self.NEG_ITEM_ID]
+            pos_items_emb = self.item_embedding(pos_items)
+            neg_items_emb = self.item_embedding(neg_items)
+            pos_score = torch.sum(seq_output * pos_items_emb, dim=-1)  # [B]
+            neg_score = torch.sum(seq_output * neg_items_emb, dim=-1)  # [B]
+            loss = self.loss_fct(pos_score, neg_score)
+        else:  # self.loss_type == 'CE'
+            # 'CE'(cross entropy), then calculate the loss by embedding the item, using the softmax function
+            # item_emb get all
+            test_item_emb = self.item_embedding.weight
+            # seq_output and all item_emb do similarity calculation # tensor.transpose exchange matrix of two dimensions, transpose(dim0, dim1)
+            # torch.matmul is multiplication of tensor,
+            # Input can be high dimensional. 2D is normal matrix multiplication like tensor.mm.
+            # When there are multiple dimensions, the extra one dimension is brought out as batch, and the other parts do matrix multiplication
+            logits = torch.matmul(seq_output, test_item_emb.transpose(0, 1))
+            logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
+            loss = self.loss_fct(logits, pos_items)
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            print("rec_loss:", loss)
+            loss = 1e-8
         return loss
 
     # 6
@@ -563,3 +586,12 @@ class MyModel(SequentialRecommender):
         amp = torch.absolute(f)
         phase = torch.angle(f)
         return amp, phase
+    
+    def mask_correlated_samples(self, batch_size):
+        N = 2 * batch_size
+        mask = torch.ones((N, N), dtype=bool)
+        mask = mask.fill_diagonal_(0)
+        for i in range(batch_size):
+            mask[i, batch_size + i] = 0
+            mask[batch_size + i, i] = 0
+        return mask
