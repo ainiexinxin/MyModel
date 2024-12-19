@@ -433,7 +433,7 @@ class MyModel(SequentialRecommender):
             # output_f = self.kan(output_f)
             seq_output_f = self.gather_indexes(output_f, item_seq_len - 1)
             # seq_output_f = self.linear_1(seq_output_f)
-            # seq_output_f = self.kan(seq_output_f)
+            seq_output_f = self.kan(seq_output_f)
             # seq_output_f = self.linear_2(seq_output_f)
             # return seq_output_t, seq_output_f, seq_output_aug
             return seq_output_t, seq_output_f
@@ -511,10 +511,10 @@ class MyModel(SequentialRecommender):
     def gcl_loss(self, interaction,item_seq, item_seq_len, cff, forward):
         loss = torch.tensor(0.0).to(self.device)
         
-        seq_output, seq_output_aug = forward(item_seq, item_seq_len)
+        seq_output, seq_first_output, seq_final_output = forward(item_seq, item_seq_len)
 
         loss += cff * self.rec_loss(interaction, seq_output)
-        loss += self.InfoNCE(seq_output_aug, seq_output)
+        loss += self.InfoNCE(self.kan(seq_final_output), self.kan(seq_first_output))
 
         return loss
     
